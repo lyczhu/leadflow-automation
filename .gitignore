@@ -1,0 +1,16 @@
+.env
+*.log
+
+# local working notes — never published
+docs/
+
+# n8n local state / exported credentials must never be committed
+.n8n/
+n8n_data/
+data/
+
+node_modules/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
