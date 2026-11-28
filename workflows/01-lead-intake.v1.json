@@ -1,0 +1,771 @@
+{
+  "name": "01-lead-intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "leadflow-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111101",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-220, 0],
+      "webhookId": "9d8f3a1e-4b2c-4f6d-9e8a-0b1c2d3e4f50"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\nconst canonical = (v) => {\n  if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';\n  if (v && typeof v === 'object') {\n    return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';\n  }\n  return JSON.stringify(v === undefined ? null : v);\n};\nconst sha256 = (s) => crypto.createHash('sha256').update(String(s), 'utf8').digest('hex');\nconst maskEmail = (s) => String(s || '').replace(/^([^@])[^@]*@/, '$1***@');\nconst maskPhone = (s) => String(s || '').replace(/^(\\+\\d)\\d+(\\d{2})$/, '$1***$2');\nconst maskText = (s) => String(s ?? '')\n  .replace(/([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})/g, '$1***@$2')\n  .replace(/(\\+\\d)[\\d\\s\\-().]*?(\\d{2})\\b/g, '$1***$2');\n\nconst input = $input.first().json;\nconst body = input.body && typeof input.body === 'object' ? input.body : {};\nconst headers = input.headers || {};\n\nconst reasons = [];\nconst warnings = [];\nconst secretEnv = $env.WEBHOOK_SHARED_SECRET || '';\nconst secret = headers['x-webhook-secret'] || '';\nif (secretEnv && secret !== secretEnv) reasons.push('bad_secret');\n\nconst form_id = String(body.form_id ?? '').trim();\nconst name = String(body.name ?? '').trim();\nconst companyRaw = String(body.company ?? '').trim();\nconst emailRaw = String(body.email ?? '').trim();\nconst message = String(body.message ?? '');\nconst phoneRaw = String(body.phone ?? '').trim();\n\nif (!form_id) reasons.push('missing_field:form_id');\nif (!name) reasons.push('missing_field:name');\nif (!companyRaw) reasons.push('missing_field:company');\n\nlet email = '';\nif (!emailRaw) reasons.push('missing_field:email');\nelse if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(emailRaw)) reasons.push('invalid_email');\nelse email = emailRaw.toLowerCase();\n\nconst SUFFIX = /(?:[\\s,.]+)(?:inc|llc|ltd|co|corp|corporation|company|plc|gmbh|ag|bv|s\\.a\\.?|a\\.s\\.|srl|s\\.r\\.l\\.|oy|ab|as|nv|sa)\\.?\\s*$/i;\nconst company = companyRaw.replace(SUFFIX, '').trim();\n\nlet phone = null;\nif (phoneRaw) {\n  let digits = phoneRaw.replace(/\\D/g, '');\n  if (!phoneRaw.startsWith('+') && digits.length === 10) digits = '1' + digits;\n  if (digits.length >= 8 && digits.length <= 15) phone = '+' + digits;\n  else warnings.push('phone_not_e164');\n}\n\nconst idempotency_key = sha256(email + '|' + form_id);\nconst payload_hash = sha256(canonical(body));\nconst run_id = crypto.randomUUID();\nconst nameParts = name.split(/\\s+/).filter(Boolean);\n\nreturn [{\n  json: {\n    valid: reasons.length === 0,\n    reject_reason: reasons[0] || null,\n    run_id,\n    received_at: new Date().toISOString(),\n    start_ts: Date.now(),\n    payload_hash,\n    idempotency_key,\n    form_id,\n    name,\n    first_name: nameParts[0] || '',\n    last_name: nameParts.slice(1).join(' '),\n    email,\n    email_masked: maskEmail(email),\n    phone,\n    phone_masked: phone ? maskPhone(phone) : '',\n    company,\n    message,\n    message_masked: maskText(message),\n    payload_masked: {\n      form_id,\n      name,\n      company,\n      message: maskText(message),\n      email: maskEmail(email),\n      phone: phone ? maskPhone(phone) : ''\n    },\n    warnings\n  }\n}];"
+      },
+      "id": "11111111-1111-4111-8111-111111111102",
+      "name": "Validate & Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [40, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-valid",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111103",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [280, 0]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.LEADFLOW_AUDIT_SHEET_ID }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "audit"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.run_id }}",
+            "received_at": "={{ $json.received_at }}",
+            "payload_hash": "={{ $json.payload_hash }}",
+            "outcome": "rejected",
+            "model_output": "",
+            "fallback": false,
+            "latency_ms": "={{ Date.now() - $json.start_ts }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "run_id", "displayName": "run_id", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "received_at", "displayName": "received_at", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "payload_hash", "displayName": "payload_hash", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "outcome", "displayName": "outcome", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "model_output", "displayName": "model_output", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "fallback", "displayName": "fallback", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "latency_ms", "displayName": "latency_ms", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111104",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "name": "Audit Rejected",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [520, 160],
+      "credentials": {
+        "googleApi": {
+          "name": "leadflow-google-sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ ($env.LEADFLOW_SLACK_ALERT_CHANNEL || 'ops-alerts').replace(/^#/, '') }}"
+        },
+        "text": "=Leadflow rejected a submission | reason: {{ $('Validate & Normalize').first().json.reject_reason }} | run_id: {{ $('Validate & Normalize').first().json.run_id }} | form_id: {{ $('Validate & Normalize').first().json.form_id || 'n/a' }} | company: {{ $('Validate & Normalize').first().json.company || 'n/a' }} | email: {{ $('Validate & Normalize').first().json.email_masked || 'n/a' }} | phone: {{ $('Validate & Normalize').first().json.phone_masked || 'n/a' }} | message: {{ $('Validate & Normalize').first().json.message_masked || 'n/a' }}",
+        "otherOptions": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111105",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "name": "Alert Invalid",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [760, 160],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "slackApi": {
+          "name": "leadflow-slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'rejected', run_id: $('Validate & Normalize').first().json.run_id, reason: $('Validate & Normalize').first().json.reject_reason }) }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111106",
+      "name": "Respond 422",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1000, 160]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const v = $('Validate & Normalize').first().json;\nconst llm_body = {\n  model: $env.LEADFLOW_OPENAI_MODEL,\n  temperature: 0,\n  messages: [\n    { role: 'system', content: 'You classify inbound B2B leads. Reply with the JSON object only.' },\n    { role: 'user', content: 'Company: ' + v.company + '\\nContact: ' + v.name + '\\nMessage: ' + (v.message || '(none)') }\n  ],\n  response_format: {\n    type: 'json_schema',\n    json_schema: {\n      name: 'lead_classification',\n      strict: true,\n      schema: {\n        type: 'object',\n        properties: {\n          intent: { type: 'string', enum: ['demo_request', 'quote_request', 'partnership', 'support', 'spam', 'other'] },\n          icp_fit: { type: 'number', minimum: 0, maximum: 1 },\n          urgency: { type: 'string', enum: ['low', 'medium', 'high'] },\n          summary: { type: 'string' }\n        },\n        required: ['intent', 'icp_fit', 'urgency', 'summary'],\n        additionalProperties: false\n      }\n    }\n  }\n};\nreturn [1, 2, 3, 4].map((attempt) => ({ json: { attempt, llm_body } }));"
+      },
+      "id": "11111111-1111-4111-8111-111111111107",
+      "name": "Prepare Attempts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, -40]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111108",
+      "name": "Attempt Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [760, -40]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.llm_body) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111109",
+      "name": "OpenAI Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, -40],
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "openAiApi": {
+          "name": "leadflow-openai"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const resp = $input.first().json;\nconst v = $('Validate & Normalize').first().json;\nconst intents = ['demo_request', 'quote_request', 'partnership', 'support', 'spam', 'other'];\nconst urgencies = ['low', 'medium', 'high'];\n\nlet parsed = null;\ntry {\n  parsed = JSON.parse(resp && resp.choices && resp.choices[0] && resp.choices[0].message ? resp.choices[0].message.content : null);\n} catch (e) {\n  parsed = null;\n}\n\nconst ok = !!parsed\n  && typeof parsed.intent === 'string' && intents.includes(parsed.intent)\n  && typeof parsed.icp_fit === 'number' && parsed.icp_fit >= 0 && parsed.icp_fit <= 1\n  && typeof parsed.urgency === 'string' && urgencies.includes(parsed.urgency)\n  && typeof parsed.summary === 'string';\n\nlet fallback = false;\nif (!ok) {\n  fallback = true;\n  parsed = {\n    intent: 'other',\n    icp_fit: 0,\n    urgency: 'medium',\n    summary: String(v.message || v.company || '').slice(0, 140)\n  };\n}\n\nconst threshold = Number($env.LEADFLOW_ICP_FIT_THRESHOLD || 0.6);\nreturn [{\n  json: {\n    intent: parsed.intent,\n    icp_fit: parsed.icp_fit,\n    urgency: parsed.urgency,\n    summary: parsed.summary,\n    fallback,\n    create_deal: parsed.icp_fit >= threshold\n  }\n}];"
+      },
+      "id": "11111111-1111-4111-8111-111111111110",
+      "name": "Parse & Validate LLM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1240, -120]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const attempt = Number($input.first().json.attempt || 1);\nreturn [{ json: { attempt, can_retry: attempt < 4 } }];"
+      },
+      "id": "11111111-1111-4111-8111-111111111125",
+      "name": "Retry Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1240, 110]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-attempts",
+              "leftValue": "={{ $json.can_retry }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "More Attempts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1240, 40]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ [2, 8, 30][Number($json.attempt) - 1] }}",
+        "unit": "seconds"
+      },
+      "id": "11111111-1111-4111-8111-111111111112",
+      "name": "Backoff Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1480, 40],
+      "webhookId": "9d8f3a1e-4b2c-4f6d-9e8a-0b1c2d3e4f51"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'failed', run_id: $('Validate & Normalize').first().json.run_id, reason: 'llm_retries_exhausted' }) }}",
+        "options": {
+          "responseCode": 502
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111113",
+      "name": "Respond 502",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1480, 160]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ JSON.stringify({ code: 'llm_retries_exhausted', run_id: $('Validate & Normalize').first().json.run_id, payload_masked: $('Validate & Normalize').first().json.payload_masked }) }}"
+      },
+      "id": "11111111-1111-4111-8111-111111111114",
+      "name": "Fail LLM",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [1720, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const v = $('Validate & Normalize').first().json; return JSON.stringify({ inputs: [{ idProperty: 'email', id: v.email, properties: { email: v.email, firstname: v.first_name, lastname: v.last_name, company: v.company, phone: v.phone || undefined } }] }); })() }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111115",
+      "name": "Upsert Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1480, -120],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "leadflow-hubspot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-deal",
+              "leftValue": "={{ $('Parse & Validate LLM').first().json.create_deal }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111116",
+      "name": "Deal Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1720, -120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals/batch/upsert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const v = $('Validate & Normalize').first().json; const m = $('Parse & Validate LLM').first().json; return JSON.stringify({ inputs: [{ idProperty: 'leadflow_idempotency_key', id: v.idempotency_key, properties: { dealname: v.company + ' — ' + m.intent + ' (' + m.urgency + ')', description: m.summary, leadflow_idempotency_key: v.idempotency_key } }] }); })() }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111117",
+      "name": "Upsert Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1960, -200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "leadflow-hubspot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.hubapi.com/crm/v3/objects/deals/{{ $('Upsert Deal').first().json.results[0].id }}/associations/contacts/{{ $('Upsert Contact').first().json.results[0].id }}/3",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111118",
+      "name": "Associate Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, -200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "leadflow-hubspot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const v = $('Validate & Normalize').first().json;\nconst m = $('Parse & Validate LLM').first().json;\nconst maskText = (s) => String(s ?? '')\n  .replace(/([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})/g, '$1***@$2')\n  .replace(/(\\+\\d)[\\d\\s\\-().]*?(\\d{2})\\b/g, '$1***$2');\n\nconst contact_id = ($('Upsert Contact').first().json && $('Upsert Contact').first().json.results && $('Upsert Contact').first().json.results[0] && $('Upsert Contact').first().json.results[0].id) || '';\nlet deal_id = 'skipped';\ntry {\n  const d = $('Upsert Deal').first().json;\n  deal_id = (d && d.results && d.results[0] && d.results[0].id) || 'skipped';\n} catch (e) {\n  deal_id = 'skipped';\n}\n\nconst model_output = JSON.stringify({\n  intent: m.intent,\n  icp_fit: m.icp_fit,\n  urgency: m.urgency,\n  summary: maskText(m.summary)\n});\n\nconst slack_text = 'New qualified lead | ' + v.company + ' | contact ' + (v.email_masked || 'n/a') +\n  ' | intent ' + m.intent + ' | icp_fit ' + m.icp_fit + ' | urgency ' + m.urgency +\n  ' | deal ' + (deal_id === 'skipped' ? 'skipped' : 'created/updated') +\n  ' | run ' + v.run_id + ' | ' + maskText(m.summary);\n\nreturn [{\n  json: {\n    run_id: v.run_id,\n    received_at: v.received_at,\n    payload_hash: v.payload_hash,\n    outcome: 'success',\n    model_output,\n    fallback: m.fallback === true,\n    latency_ms: Date.now() - v.start_ts,\n    contact_id,\n    deal_id,\n    slack_text\n  }\n}];"
+      },
+      "id": "11111111-1111-4111-8111-111111111119",
+      "name": "Build Success Audit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, -40]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ ($env.LEADFLOW_SLACK_NOTIFY_CHANNEL || 'leads').replace(/^#/, '') }}"
+        },
+        "text": "={{ $json.slack_text }}",
+        "otherOptions": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111120",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "name": "Notify Success",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2440, -40],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "slackApi": {
+          "name": "leadflow-slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.LEADFLOW_AUDIT_SHEET_ID }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "audit"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $('Build Success Audit').first().json.run_id }}",
+            "received_at": "={{ $('Build Success Audit').first().json.received_at }}",
+            "payload_hash": "={{ $('Build Success Audit').first().json.payload_hash }}",
+            "outcome": "={{ $('Build Success Audit').first().json.outcome }}",
+            "model_output": "={{ $('Build Success Audit').first().json.model_output }}",
+            "fallback": "={{ $('Build Success Audit').first().json.fallback }}",
+            "latency_ms": "={{ $('Build Success Audit').first().json.latency_ms }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "run_id", "displayName": "run_id", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "received_at", "displayName": "received_at", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "payload_hash", "displayName": "payload_hash", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "outcome", "displayName": "outcome", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "model_output", "displayName": "model_output", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "fallback", "displayName": "fallback", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" },
+            { "id": "latency_ms", "displayName": "latency_ms", "required": false, "defaultMatch": false, "display": true, "canBeUsedToMatch": true, "removed": false, "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111121",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "name": "Audit Success",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2680, -40],
+      "credentials": {
+        "googleApi": {
+          "name": "leadflow-google-sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', run_id: $('Build Success Audit').first().json.run_id, contact_id: $('Build Success Audit').first().json.contact_id, deal_id: $('Build Success Audit').first().json.deal_id }) }}",
+        "options": {
+          "responseCode": 201
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111122",
+      "name": "Respond 201",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2920, -40]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate & Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Normalize": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Attempts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Audit Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Rejected": {
+      "main": [
+        [
+          {
+            "node": "Alert Invalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Invalid": {
+      "main": [
+        [
+          {
+            "node": "Respond 422",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Attempts": {
+      "main": [
+        [
+          {
+            "node": "Attempt Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attempt Loop": {
+      "main": [
+        [],
+        [
+          {
+            "node": "OpenAI Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Classify": {
+      "main": [
+        [
+          {
+            "node": "Parse & Validate LLM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Gate": {
+      "main": [
+        [
+          {
+            "node": "More Attempts?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "More Attempts?": {
+      "main": [
+        [
+          {
+            "node": "Backoff Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 502",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backoff Wait": {
+      "main": [
+        [
+          {
+            "node": "Attempt Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond 502": {
+      "main": [
+        [
+          {
+            "node": "Fail LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Validate LLM": {
+      "main": [
+        [
+          {
+            "node": "Upsert Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Contact": {
+      "main": [
+        [
+          {
+            "node": "Deal Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deal Gate": {
+      "main": [
+        [
+          {
+            "node": "Upsert Deal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Success Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Deal": {
+      "main": [
+        [
+          {
+            "node": "Associate Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Associate Contact": {
+      "main": [
+        [
+          {
+            "node": "Build Success Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Success Audit": {
+      "main": [
+        [
+          {
+            "node": "Notify Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Success": {
+      "main": [
+        [
+          {
+            "node": "Audit Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Success": {
+      "main": [
+        [
+          {
+            "node": "Respond 201",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}
