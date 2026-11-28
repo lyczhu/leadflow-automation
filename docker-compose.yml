@@ -35,8 +35,11 @@ services:
       N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
       WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Shanghai}
+      TZ: ${GENERIC_TIMEZONE:-Asia/Shanghai}
       N8N_DIAGNOSTICS_ENABLED: "false"
       # Leadflow runtime config, read inside nodes via $env.*
+      # n8n 2.x blocks env access in nodes by default; the workflows rely on $env
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
       LEADFLOW_ICP_FIT_THRESHOLD: ${LEADFLOW_ICP_FIT_THRESHOLD:-0.6}
       LEADFLOW_OPENAI_MODEL: ${LEADFLOW_OPENAI_MODEL:-}
       LEADFLOW_AUDIT_SHEET_ID: ${LEADFLOW_AUDIT_SHEET_ID:-}
@@ -45,7 +48,7 @@ services:
       WEBHOOK_SHARED_SECRET: ${WEBHOOK_SHARED_SECRET:-}
       # Code node allowlist: Validate & Normalize needs sha256 / randomUUID
       NODE_FUNCTION_ALLOW_BUILTIN: "crypto"
-      # Execution data retention (spec 7.8)
+      # Execution data retention
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: "72"
       EXECUTIONS_DATA_SAVE_ON_SUCCESS: "all"
