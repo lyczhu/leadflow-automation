@@ -6,7 +6,7 @@ One-time provisioning, deployment and the acceptance procedure for this pipeline
 
 - Docker Desktop running (`docker info` exits 0)
 - A pinned n8n version chosen from the current stable releases (never `latest`); if the image or a node type turns out to be incompatible, stop and record the failure instead of silently downgrading
-- Accounts: OpenAI, HubSpot (private app), Slack workspace, Google Cloud service account with Sheets API enabled
+- Accounts: OpenAI, HubSpot (service key), Slack workspace, Google Cloud service account with Sheets API enabled
 
 ## 2. Start the stack
 
@@ -21,7 +21,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5678/healthz
 
 ### 3.1 n8n API key
 
-UI → Settings → n8n API. Scopes needed: workflows read/write, credentials read. Store it as `N8N_API_KEY` in the local `.env` (git-ignored).
+UI → Settings → n8n API. Scopes needed: workflow read/write, credentials read. Store it as `N8N_API_KEY` in the local `.env` (git-ignored).
 
 ### 3.2 Credentials inside n8n
 
@@ -30,13 +30,15 @@ Create these four credentials with exactly these names (see `contract.md` §9):
 | Name | Type | Value |
 | --- | --- | --- |
 | `leadflow-openai` | OpenAI API | API key |
-| `leadflow-hubspot` | Header Auth | header `Authorization`, value `Bearer pat-…` |
+| `leadflow-hubspot` | Header Auth | header `Authorization`, value `Bearer pat-…` (service key) |
 | `leadflow-slack` | Slack API | bot token (`chat:write`) |
-| `leadflow-google-sheets` | Google API (Service Account) | service account JSON |
+| `leadflow-google-sheets` | Google Service Account API | `client_email` as Service Account Email, `private_key` (full PEM) as Private Key |
+
+In n8n 2.x the name is not asked up front: the credential is created as `<type> account`, rename it via the title in the credential modal before saving.
 
 ### 3.3 HubSpot
 
-- Private app scopes: `crm.objects.contacts.read/write`, `crm.objects.deals.read/write`, `crm.schemas.deals.read/write`
+- Create a service key under Development → Keys → Service keys (legacy private apps can no longer be created since Oct 2026). Scopes: `crm.objects.contacts.read/write`, `crm.objects.deals.read/write`, `crm.schemas.deals.read/write`
 - Create the unique deal property (once) — command in `contract.md` §4. The property must require unique values.
 - Store the token as `HUBSPOT_TOKEN` in the local `.env` (used only by the acceptance script).
 
@@ -92,7 +94,7 @@ Use sentinel values (`acceptance-<YYYYMMDD>@example.com`, `form_id=acceptance-<Y
 | --- | --- | --- |
 | 1 | Same `email + form_id` twice: no new records, 1 contact, ≤1 deal | `scripts/acceptance.ps1` |
 | 2 | Invalid payloads (missing `email`, bad `email`, bad secret): 422, stable codes, no CRM writes, masked alert | script + visual Slack check |
-| 3 | Wrong OpenAI key: 4 HTTP attempts (1 + 3 retries at ~2/8/30 s), then exactly 1 alert, 1 `failed` audit row | manual: swap key in n8n UI, submit, wait ~40 s, restore key |
+| 3 | Wrong OpenAI key: 4 HTTP attempts (initial + 3 retries at ~2/8/30 s), then exactly 1 alert, 1 `failed` audit row | manual: swap key in n8n UI, submit, wait up to ~80 s (40 s of backoff plus call time), restore key |
 | 4 | Exactly one audit row per execution; `payload_hash` recomputes | script (hash) + row-count check |
 | 5 | `docker compose config` exits 0 | script |
 | 6 | Fallback branch: pinned unusable classifier output → `fallback=true`, `outcome=success`, no new deal | n8n pinned data / temporary mock |
@@ -109,6 +111,7 @@ Cleanup: delete the sentinel contacts and deals (`DELETE /crm/v3/objects/{object
 
 - **Workflow not receiving traffic**: check `active` state via `GET /api/v1/workflows`; production webhooks only work when active. Test webhooks (`/webhook-test/…`) only work while the editor is listening.
 - **`$env` values empty**: env vars are read when the container starts; recreate the container after editing `.env`.
+- **Timestamps look shifted by 8 h**: `GENERIC_TIMEZONE` only drives workflow expressions; the UI renders in the container's `TZ` (UTC unless set). Compose sets `TZ` from `GENERIC_TIMEZONE`.
 - **Credential errors after redeploy**: the deploy script maps by name — renaming a credential in the UI breaks the mapping until the script is re-run.
-- **Retry loop not visible**: retries are an explicit loop, not node-level `retryOnFail`; count the HTTP node runs in the execution, not retry badges.
+- **Retry counts look wrong**: the classifier uses an explicit loop (count the HTTP node runs in the execution, not retry badges); every other outbound call uses node-level `retryOnFail`, whose retries appear as retry badges on that node.
 - **Duplicate deals after rapid submissions**: the deal upsert depends on the unique `leadflow_idempotency_key` property; confirm `isUnique` in the property definition.

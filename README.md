@@ -34,14 +34,14 @@ flowchart LR
 | # | Node | Responsibility |
 | --- | --- | --- |
 | 1 | `Webhook` | Receives form POST, verifies shared secret |
-| 2 | `Validate` | Schema check: required fields, email format, phone normalization |
+| 2 | `Validate & Normalize` | Schema check: required fields, email format, phone normalization |
 | 3 | `Dedupe keys` | Contact key = normalized email; deal key = sha256(email + form_id). Both applied through upsert, never search-then-create |
 | 4 | `Classify` | OpenAI call with JSON Schema: `intent`, `icp_fit`, `urgency`, `summary` |
 | 5 | `Upsert Contact` | HubSpot contact create-or-update, keyed by email |
 | 6 | `Upsert Deal` | Create-or-update keyed by the idempotency key; only when `icp_fit >= threshold` |
 | 7 | `Notify` | Slack message with a one-line summary (owner routing is out of scope) |
 | 8 | `Audit` | Appends run id, payload hash, outcome, LLM output to Sheets |
-| 9 | `Error branch` | Exponential backoff, then alert; never fails silently |
+| 9 | `Error branch` | Escalating backoff, then alert through the error workflow; never fails silently |
 
 ## Design notes
 
@@ -69,7 +69,12 @@ docker compose up -d
 open http://localhost:5678  # n8n UI
 ```
 
-Then import the workflow from `workflows/` and set the credentials inside n8n.
+Then deploy the workflows and create the four credentials inside n8n:
+
+```powershell
+pwsh scripts/deploy-workflows.ps1 -DryRun   # inspect the credential mapping first
+pwsh scripts/deploy-workflows.ps1
+```
 
 - Field-level contract (payload, hashing, CRM mapping, environment variables): [`reference/contract.md`](reference/contract.md)
 - One-time setup and the acceptance runbook: [`reference/setup.md`](reference/setup.md)
@@ -81,6 +86,7 @@ Then import the workflow from `workflows/` and set the credentials inside n8n.
 ├── docker-compose.yml      # n8n + postgres
 ├── .env.example
 ├── workflows/              # exported n8n JSON, versioned
+├── scripts/                # deploy + acceptance scripts
 ├── reference/              # integration contract + setup runbook
 └── LICENSE
 ```

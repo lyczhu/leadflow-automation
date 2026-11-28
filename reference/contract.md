@@ -1,6 +1,16 @@
 # Integration contract
 
-Field-level contract for the leadflow pipeline. Implementers, operators and acceptance checks treat this file as the reference for payloads, hashing, CRM mapping, environment variables and credentials. The engineering constraints live in `docs/spec.md` (local working notes, not published); this file is the public, versioned copy.
+Field-level contract for the leadflow pipeline. Implementers, operators and acceptance checks treat this file as the single reference for scope, payloads, normalisation, hashing, CRM mapping, the classifier contract, environment variables, credentials and runtime behaviour. Provisioning and the acceptance procedure live in [`setup.md`](setup.md).
+
+## 0. Scope and non-negotiables
+
+- Two versioned workflows: `01-lead-intake` (inbound path) and `02-error-handler` (workflow-level error handler bound through `settings.errorWorkflow`).
+- n8n runs from a pinned image (`N8N_VERSION` in `.env`, never `latest`); `postgres:16-alpine` holds n8n state only.
+- The repository contains no credential values. Workflow JSON carries credential names only; ids are injected at deploy time by `scripts/deploy-workflows.ps1`.
+- Every execution produces exactly one terminal HTTP response (201 / 422 / 502) and exactly one audit row.
+- Validation failures never reach the classifier or the CRM.
+- Deal creation is gated by `icp_fit >= LEADFLOW_ICP_FIT_THRESHOLD`; the threshold is read from the environment and never hard-coded in a node.
+- Success-path latency budget: p95 ≤ 10 s, measured from `latency_ms` over 50 submissions.
 
 ## 1. Webhook
 
@@ -67,7 +77,7 @@ Only the trailing match is removed; no mid-string replacement.
   - Contact: `email`, `firstname`, `lastname`, `company`, `phone`
   - Deal: `dealname` = `{company} — {intent} ({urgency})`, `description` = `summary`, `leadflow_idempotency_key`
   - `pipeline` / `dealstage` use HubSpot defaults; add `LEADFLOW_DEAL_PIPELINE` only if the portal rejects the default.
-- Private app scopes: `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.objects.deals.read`, `crm.objects.deals.write`, `crm.schemas.deals.read`, `crm.schemas.deals.write`.
+- Service key scopes (sent as `Authorization: Bearer pat-…`): `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.objects.deals.read`, `crm.objects.deals.write`, `crm.schemas.deals.read`, `crm.schemas.deals.write`.
 - Deal owner assignment is out of scope.
 
 Creating the unique property (one-time):
