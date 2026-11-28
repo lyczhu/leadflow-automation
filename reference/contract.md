@@ -38,6 +38,7 @@ Unknown fields are ignored for normalisation but still count towards `payload_ha
 | Success (incl. fallback) | 201 | `{"status":"accepted","run_id":"…","contact_id":"…","deal_id":"…"\|"skipped"}` |
 | Rejected payload | 422 | `{"status":"rejected","run_id":"…","reason":"<stable code>"}` |
 | LLM retries exhausted | 502 | `{"status":"failed","run_id":"…","reason":"llm_retries_exhausted"}` |
+| CRM write failed after retries | 502 | `{"status":"failed","run_id":"…","reason":"crm_write_failed"}` |
 
 Rejection codes are stable: `missing_field:<field>`, `invalid_email`, `bad_secret`.
 
@@ -162,4 +163,5 @@ Workflow JSON references these by name only. `scripts/deploy-workflows.ps1` inje
 - Escalating backoff (3 retries at 2 s / 8 s / 30 s, four attempts in total) applies to the LLM call only. It is implemented as an explicit loop and must be countable in the execution history.
 - Other outbound calls use node-level retries (`maxTries=3`, `waitBetweenTries=2000`). Platform caps: `maxTries` ≤ 5 and `waitBetweenTries` ≤ 5000 ms, so escalating backoff cannot be expressed with node retries.
 - Notification failures (Slack, Sheets) do not fail the run: `continueRegularOutput`.
+- CRM writes do fail the run: `continueErrorOutput` routes the failed item to a `crm_write_failed` branch that responds 502 first and only then stops with an error, so the caller never waits and the error workflow still writes the `failed` audit row.
 - Execution data retention: `EXECUTIONS_DATA_PRUNE=true`, `EXECUTIONS_DATA_MAX_AGE=72` hours, success and error data saved. Raw payloads (with PII) live in the n8n database for at most that window and are treated as debug data, not as an external log.
