@@ -17,13 +17,23 @@ manual credential swap / pinned data, 8 is a git grep, 10 needs a 50-run sample
 (use -LatencySampleCount 50 once the pipeline is stable).
 
 Requires HUBSPOT_TOKEN in the local .env and a running n8n instance.
+
+-Cleanup switches to maintenance mode: it lists every deal carrying
+leadflow_idempotency_key (the property only this pipeline writes) and every
+contact whose address is under @example.com, then archives them with -Force.
+Without -Force it only reports what would be removed. Contact enumeration needs
+crm.objects.contacts.read on the private app; without that scope the deals are
+still cleaned and the remaining contact ids are printed. Audit rows are never
+touched: the script holds no Sheets credentials, so clear the tab manually.
 #>
 [CmdletBinding()]
 param(
     [string]$Root = (Split-Path -Parent $PSScriptRoot),
     [string]$WebhookUrl = 'http://localhost:5678/webhook/leadflow-intake',
     [string]$N8nBaseUrl = 'http://localhost:5678/api/v1',
-    [int]$LatencySampleCount = 0
+    [int]$LatencySampleCount = 0,
+    [switch]$Cleanup,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,27 +65,36 @@ function Add-Result([string]$Name, [bool]$Pass, [string]$Detail) {
     Write-Host ("[{0}] {1} - {2}" -f $tag, $Name, $Detail)
 }
 
-# --- canonical JSON / hashing (must match the workflow implementation) --------
+function Get-CanonicalString([string]$Text) {
+    $escaped = $Text.Replace('\', '\\').Replace('"', '\"')
+    $escaped = $escaped -replace "`n", '\n' -replace "`r", '\r' -replace "`t", '\t'
+    return '"' + $escaped + '"'
+}
+
+# Mirrors canonical() in Validate & Normalize: sorted object keys, JSON.stringify
+# scalars, arrays in order. PowerShell never unrolls an IDictionary through the
+# pipeline, so dictionaries must be walked explicitly or this recurses forever.
 function Get-CanonicalJson($Value) {
     if ($null -eq $Value) { return 'null' }
     if ($Value -is [bool]) { return $(if ($Value) { 'true' } else { 'false' }) }
     if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
         return ([double]$Value).ToString([System.Globalization.CultureInfo]::InvariantCulture)
     }
-    if ($Value -is [string]) {
-        $escaped = $Value.Replace('\', '\\').Replace('"', '\"')
-        $escaped = $escaped -replace "`n", '\n' -replace "`r", '\r' -replace "`t", '\t'
-        return '"' + $escaped + '"'
+    if ($Value -is [string]) { return Get-CanonicalString $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $keys = @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)
+        $parts = foreach ($p in $keys) { (Get-CanonicalString $p) + ':' + (Get-CanonicalJson $Value[$p]) }
+        return '{' + ($parts -join ',') + '}'
     }
     if ($Value -is [System.Array]) {
         return '[' + (($Value | ForEach-Object { Get-CanonicalJson $_ }) -join ',') + ']'
     }
     if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-        return '[' + (($Value | ForEach-Object { Get-CanonicalJson $_ }) -join ',') + ']'
+        return '[' + (((@($Value)) | ForEach-Object { Get-CanonicalJson $_ }) -join ',') + ']'
     }
     if ($Value -is [psobject]) {
-        $props = $Value.PSObject.Properties.Name | Sort-Object
-        $parts = foreach ($p in $props) { '"' + $p + '":' + (Get-CanonicalJson $Value.$p) }
+        $props = @($Value.PSObject.Properties.Name | Sort-Object)
+        $parts = foreach ($p in $props) { (Get-CanonicalString $p) + ':' + (Get-CanonicalJson $Value.$p) }
         return '{' + ($parts -join ',') + '}'
     }
     return 'null'
@@ -107,13 +126,80 @@ function Invoke-WebhookRequest($Body, [hashtable]$ExtraHeaders = @{}) {
 
 $hubspotHeaders = @{ Authorization = "Bearer $hubspotToken"; 'Content-Type' = 'application/json' }
 
-function Search-Hubspot([string]$ObjectType, [string]$PropertyName, [string]$Value) {
+function Search-Hubspot([string]$ObjectType, [string]$PropertyName, [string]$Value, [string[]]$Properties = @()) {
     $body = @{
         filterGroups = @(@{ filters = @(@{ propertyName = $PropertyName; operator = 'EQ'; value = $Value }) })
         limit        = 10
-    } | ConvertTo-Json -Depth 10 -Compress
-    $resp = Invoke-WebRequest -Method POST -Uri "https://api.hubapi.com/crm/v3/objects/$ObjectType/search" -Headers $hubspotHeaders -Body $body -SkipHttpErrorCheck
+    }
+    # Without an explicit list HubSpot only returns the default property set,
+    # which does not include company.
+    if ($Properties.Count -gt 0) { $body['properties'] = $Properties }
+    $json = $body | ConvertTo-Json -Depth 10 -Compress
+    $resp = Invoke-WebRequest -Method POST -Uri "https://api.hubapi.com/crm/v3/objects/$ObjectType/search" -Headers $hubspotHeaders -Body $json -SkipHttpErrorCheck
     return ($resp.Content | ConvertFrom-Json)
+}
+
+function Invoke-HubspotApi([string]$Method, [string]$Path, $Body = $null) {
+    $req = @{
+        Method             = $Method
+        Uri                = "https://api.hubapi.com$Path"
+        Headers            = $hubspotHeaders
+        TimeoutSec         = 60
+        SkipHttpErrorCheck = $true
+    }
+    if ($null -ne $Body) { $req['Body'] = ($Body | ConvertTo-Json -Depth 10 -Compress) }
+    $resp = Invoke-WebRequest @req
+    $json = $null
+    if ($resp.Content) { try { $json = $resp.Content | ConvertFrom-Json } catch { $json = $null } }
+    return [pscustomobject]@{ Status = [int]$resp.StatusCode; Json = $json; Raw = $resp.Content }
+}
+
+# --- cleanup selectors --------------------------------------------------------
+# Deals are identified by the property only this pipeline writes, so the selector
+# stays valid without read access to contacts. Contacts are archived only when
+# they can be proven to be sentinels (address under example.com), which needs
+# crm.objects.contacts.read on the private app.
+function Find-PipelineDeals {
+    $found = [System.Collections.Generic.List[object]]::new()
+    $after = $null
+    do {
+        $body = @{
+            filterGroups = @(@{ filters = @(@{ propertyName = 'leadflow_idempotency_key'; operator = 'HAS_PROPERTY' }) })
+            properties   = @('leadflow_idempotency_key')
+            limit        = 100
+        }
+        if ($after) { $body['after'] = $after }
+        $r = Invoke-HubspotApi 'POST' '/crm/v3/objects/deals/search' $body
+        if ($r.Status -ne 200) { return [pscustomobject]@{ Ok = $false; Status = $r.Status; Raw = $r.Raw; Deals = $found } }
+        foreach ($d in @($r.Json.results)) { $found.Add($d) }
+        $after = $r.Json.paging.next.after
+    } while ($after)
+    return [pscustomobject]@{ Ok = $true; Status = 200; Raw = ''; Deals = $found }
+}
+
+function Find-SentinelContacts {
+    $found = [System.Collections.Generic.List[object]]::new()
+    $after = $null
+    do {
+        $body = @{
+            filterGroups = @(@{ filters = @(@{ propertyName = 'email'; operator = 'CONTAINS_TOKEN'; value = 'example.com' }) })
+            properties   = @('email', 'company')
+            limit        = 100
+        }
+        if ($after) { $body['after'] = $after }
+        $r = Invoke-HubspotApi 'POST' '/crm/v3/objects/contacts/search' $body
+        if ($r.Status -ne 200) { return [pscustomobject]@{ Ok = $false; Status = $r.Status; Raw = $r.Raw; Contacts = $found } }
+        foreach ($c in @($r.Json.results)) { $found.Add($c) }
+        $after = $r.Json.paging.next.after
+    } while ($after)
+    return [pscustomobject]@{ Ok = $true; Status = 200; Raw = ''; Contacts = $found }
+}
+
+function Get-DealContactIds([string]$DealId) {
+    $r = Invoke-HubspotApi 'GET' "/crm/v3/objects/deals/$DealId/associations/contacts"
+    if ($r.Status -eq 404) { return @() }
+    if ($r.Status -ne 200) { throw "association lookup failed for deal $DealId : HTTP $($r.Status) $($r.Raw)" }
+    return @(@($r.Json.results) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
 }
 
 # --- audit data via n8n executions API (best effort) --------------------------
@@ -140,6 +226,59 @@ function Get-NodeOutput($Execution, [string]$NodeName) {
     catch { return $null }
 }
 
+# --- cleanup mode (maintenance, exits before any assertion runs) ---------------
+if ($Cleanup) {
+    Write-Host 'Cleanup mode: scanning HubSpot for pipeline deals and sentinel contacts'
+    $dealResult = Find-PipelineDeals
+    if (-not $dealResult.Ok) { throw "deal search failed: HTTP $($dealResult.Status) $($dealResult.Raw)" }
+    $contactResult = Find-SentinelContacts
+
+    $dealIds = @($dealResult.Deals | ForEach-Object { [string]$_.id })
+    $linkedContactIds = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($dealId in $dealIds) {
+        foreach ($contactId in (Get-DealContactIds $dealId)) { [void]$linkedContactIds.Add($contactId) }
+    }
+
+    $contactIds = @()
+    if ($contactResult.Ok) {
+        $contactIds = @($contactResult.Contacts | ForEach-Object { [string]$_.id })
+        Write-Host ("Deals: {0} | sentinel contacts: {1} | contacts linked to those deals: {2}" -f $dealIds.Count, $contactIds.Count, $linkedContactIds.Count)
+        foreach ($c in $contactResult.Contacts) { Write-Host ("  contact {0} {1}" -f $c.id, $c.properties.email) }
+    }
+    else {
+        Write-Host ("Deals: {0} | contacts linked to those deals: {1}" -f $dealIds.Count, $linkedContactIds.Count)
+        Write-Host ("WARN contact search returned HTTP {0}: the token lacks crm.objects.contacts.read, so contacts cannot be identified and will be left in place." -f $contactResult.Status)
+        Write-Host '     Grant that scope to the private app (or remove the contacts by hand) before the final cleanup.'
+        if ($linkedContactIds.Count -gt 0) { Write-Host ('     Linked contact ids: ' + (@($linkedContactIds) -join ', ')) }
+    }
+    foreach ($dealId in $dealIds) { Write-Host "  deal $dealId" }
+
+    if (-not $Force) {
+        Write-Host 'Dry run: nothing was deleted. Re-run with -Cleanup -Force to archive these records.'
+        exit 0
+    }
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+    foreach ($dealId in $dealIds) {
+        $r = Invoke-HubspotApi 'DELETE' "/crm/v3/objects/deals/$dealId"
+        if ($r.Status -notin @(200, 204, 404)) { $failures.Add("deal $dealId -> HTTP $($r.Status)") }
+    }
+    foreach ($contactId in $contactIds) {
+        $r = Invoke-HubspotApi 'DELETE' "/crm/v3/objects/contacts/$contactId"
+        if ($r.Status -notin @(200, 204, 404)) { $failures.Add("contact $contactId -> HTTP $($r.Status)") }
+    }
+
+    Write-Host ("Archived {0} deal(s) and {1} contact(s)." -f $dealIds.Count, $contactIds.Count)
+    if (-not $contactResult.Ok) { Write-Host 'Contacts are still present: grant crm.objects.contacts.read and re-run to remove them.' }
+    if ($failures.Count -gt 0) {
+        Write-Host ("Failed to archive {0} record(s):" -f $failures.Count)
+        $failures | ForEach-Object { Write-Host "  $_" }
+        exit 1
+    }
+    Write-Host 'Cleanup complete. Clear the acceptance rows in the audit sheet manually.'
+    exit 0
+}
+
 # --- setup --------------------------------------------------------------------
 $stamp = Get-Date -Format 'yyyyMMddHHmmss'
 $sentinelEmail = "acceptance-$stamp@example.com"
@@ -159,6 +298,11 @@ Write-Host "Sentinel email: $sentinelEmail | form_id: $sentinelForm"
 $expectedHash = Get-Sha256Hex (Get-CanonicalJson $payload)
 Write-Host "Expected payload_hash: $expectedHash"
 
+$contactProbe = Find-SentinelContacts
+if (-not $contactProbe.Ok) {
+    throw "HUBSPOT_TOKEN cannot search contacts (HTTP $($contactProbe.Status)). Grant crm.objects.contacts.read to the private app: assertions 1, 2 and 9 need it."
+}
+
 # --- assertion 1 --------------------------------------------------------------
 $first = Invoke-WebhookRequest $payload
 $second = Invoke-WebhookRequest $payload
@@ -177,7 +321,7 @@ $variantA = [ordered]@{ form_id = "$sentinelForm-norm"; name = 'Normalise A'; em
 $variantB = [ordered]@{ form_id = "$sentinelForm-norm"; name = 'Normalise A'; email = "normalise-$stamp@example.com"; company = 'Acme' }
 $null = Invoke-WebhookRequest $variantA
 $null = Invoke-WebhookRequest $variantB
-$normContacts = Search-Hubspot 'contacts' 'email' "normalise-$stamp@example.com"
+$normContacts = Search-Hubspot 'contacts' 'email' "normalise-$stamp@example.com" -Properties @('email', 'company')
 $normCount = @($normContacts.results).Count
 $normCompany = ''
 if ($normCount -gt 0) { $normCompany = $normContacts.results[0].properties.company }

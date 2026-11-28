@@ -105,7 +105,7 @@ Use sentinel values (`acceptance-<YYYYMMDD>@example.com`, `form_id=acceptance-<Y
 
 After assertion 3, restore the OpenAI credential, re-run assertion 1, and reset `LEADFLOW_ICP_FIT_THRESHOLD` to `0.6` before committing anything.
 
-Cleanup: delete the sentinel contacts and deals (`DELETE /crm/v3/objects/{object}/{id}`) and clear acceptance rows from the audit tab so demo recordings start from a clean sheet.
+Cleanup: `pwsh scripts/acceptance.ps1 -Cleanup` lists every deal carrying `leadflow_idempotency_key` (the property only this pipeline writes) and every `@example.com` contact; add `-Force` to archive them. Contact enumeration needs `crm.objects.contacts.read` on the HubSpot private app; without it only the deals are removed and the script prints the leftover contact ids. Clear the acceptance rows from the audit tab by hand so demo recordings start from a clean sheet.
 
 ## 7. Troubleshooting
 
