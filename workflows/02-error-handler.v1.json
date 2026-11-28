@@ -13,7 +13,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "const j = $input.first().json;\nconst err = (j.execution && j.execution.error) || {};\nconst raw = String(err.message || '');\nconst maskText = (s) => String(s ?? '')\n  .replace(/([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})/g, '$1***@$2')\n  .replace(/(\\+\\d)[\\d\\s\\-().]*?(\\d{2})\\b/g, '$1***$2');\n\nlet parsed = null;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  parsed = null;\n}\nconst llm = parsed && parsed.code === 'llm_retries_exhausted' ? parsed : null;\nconst run_id = (llm && llm.run_id) || '';\nconst payload = llm && llm.payload_masked ? JSON.stringify(llm.payload_masked) : '';\n\nreturn [{\n  json: {\n    workflow: (j.workflow && j.workflow.name) || '',\n    execution_id: (j.execution && j.execution.id) || '',\n    execution_url: (j.execution && j.execution.url) || '',\n    node: (err.node && err.node.name) || '',\n    error_message: maskText(raw).slice(0, 1200),\n    run_id,\n    payload_masked: maskText(payload),\n    received_at: new Date().toISOString()\n  }\n}];"
+        "jsCode": "const j = $input.first().json;\nconst err = (j.execution && j.execution.error) || {};\nconst raw = String(err.message || '');\nconst maskText = (s) => String(s ?? '')\n  .replace(/([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})/g, '$1***@$2')\n  .replace(/(\\+\\d)[\\d\\s\\-().]*?(\\d{2})\\b/g, '$1***$2');\n\nlet parsed = null;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  parsed = null;\n}\nconst detail = parsed && parsed.run_id ? parsed : null;\nconst run_id = (detail && detail.run_id) || '';\nconst payload_hash = (detail && detail.payload_hash) || '';\nconst latency_ms = detail && detail.latency_ms !== undefined && detail.latency_ms !== null ? Number(detail.latency_ms) : '';\nconst reason = (detail && detail.code) || 'unhandled_error';\nconst payload = detail && detail.payload_masked ? JSON.stringify(detail.payload_masked) : '';\n\nreturn [{\n  json: {\n    workflow: (j.workflow && j.workflow.name) || '',\n    execution_id: (j.execution && j.execution.id) || '',\n    execution_url: (j.execution && j.execution.url) || '',\n    node: (err.node && err.node.name) || '',\n    reason,\n    error_message: maskText(raw).slice(0, 1200),\n    run_id,\n    payload_hash,\n    latency_ms,\n    payload_masked: maskText(payload),\n    received_at: new Date().toISOString()\n  }\n}];"
       },
       "id": "22222222-2222-4222-8222-222222222202",
       "name": "Compose Alert",
@@ -40,11 +40,11 @@
           "value": {
             "run_id": "={{ $json.run_id || $json.execution_id }}",
             "received_at": "={{ $json.received_at }}",
-            "payload_hash": "",
+            "payload_hash": "={{ $json.payload_hash }}",
             "outcome": "failed",
             "model_output": "",
             "fallback": false,
-            "latency_ms": ""
+            "latency_ms": "={{ $json.latency_ms }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -84,7 +84,7 @@
           "mode": "name",
           "value": "={{ ($env.LEADFLOW_SLACK_ALERT_CHANNEL || 'ops-alerts').replace(/^#/, '') }}"
         },
-        "text": "=Leadflow execution failed | workflow: {{ $json.workflow }} | node: {{ $json.node || 'n/a' }} | run_id: {{ $json.run_id || 'n/a' }} | execution: {{ $json.execution_url }} | payload: {{ $json.payload_masked || 'n/a' }} | error: {{ $json.error_message }}",
+        "text": "=Leadflow execution failed | reason: {{ $json.reason }} | workflow: {{ $json.workflow }} | node: {{ $json.node || 'n/a' }} | run_id: {{ $json.run_id || 'n/a' }} | execution: {{ $json.execution_url }} | payload: {{ $json.payload_masked || 'n/a' }} | error: {{ $json.error_message }}",
         "otherOptions": {}
       },
       "id": "22222222-2222-4222-8222-222222222204",

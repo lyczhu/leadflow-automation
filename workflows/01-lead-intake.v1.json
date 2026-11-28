@@ -287,7 +287,7 @@
     },
     {
       "parameters": {
-        "errorMessage": "={{ JSON.stringify({ code: 'llm_retries_exhausted', run_id: $('Validate & Normalize').first().json.run_id, payload_masked: $('Validate & Normalize').first().json.payload_masked }) }}"
+        "errorMessage": "={{ JSON.stringify({ code: 'llm_retries_exhausted', run_id: $('Validate & Normalize').first().json.run_id, payload_hash: $('Validate & Normalize').first().json.payload_hash, latency_ms: Date.now() - $('Validate & Normalize').first().json.start_ts, payload_masked: $('Validate & Normalize').first().json.payload_masked }) }}"
       },
       "id": "11111111-1111-4111-8111-111111111114",
       "name": "Fail LLM",
@@ -309,6 +309,7 @@
         }
       },
       "id": "11111111-1111-4111-8111-111111111115",
+      "onError": "continueErrorOutput",
       "name": "Upsert Contact",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -367,6 +368,7 @@
         }
       },
       "id": "11111111-1111-4111-8111-111111111117",
+      "onError": "continueErrorOutput",
       "name": "Upsert Deal",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -391,6 +393,7 @@
         }
       },
       "id": "11111111-1111-4111-8111-111111111118",
+      "onError": "continueErrorOutput",
       "name": "Associate Contact",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
@@ -510,6 +513,42 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [2920, -40]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const v = $('Validate & Normalize').first().json;\nconst err = $json.error || {};\nreturn [{\n  json: {\n    run_id: v.run_id,\n    payload_hash: v.payload_hash,\n    latency_ms: Date.now() - v.start_ts,\n    reason: 'crm_write_failed',\n    error_message: String(err.message || '').slice(0, 300),\n    payload_masked: v.payload_masked\n  }\n}];"
+      },
+      "id": "11111111-1111-4111-8111-111111111126",
+      "name": "Build CRM Failure Audit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1720, -320]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'failed', run_id: $('Build CRM Failure Audit').first().json.run_id, reason: 'crm_write_failed' }) }}",
+        "options": {
+          "responseCode": 502
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111127",
+      "name": "Respond 502 CRM",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1960, -320]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ JSON.stringify({ code: 'crm_write_failed', run_id: $('Build CRM Failure Audit').first().json.run_id, payload_hash: $('Build CRM Failure Audit').first().json.payload_hash, latency_ms: $('Build CRM Failure Audit').first().json.latency_ms, payload_masked: $('Build CRM Failure Audit').first().json.payload_masked }) }}"
+      },
+      "id": "11111111-1111-4111-8111-111111111128",
+      "name": "Fail CRM",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [2200, -320]
     }
   ],
   "connections": {
@@ -686,6 +725,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build CRM Failure Audit",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -715,6 +761,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build CRM Failure Audit",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -726,8 +779,40 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build CRM Failure Audit",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
+    },
+    "Build CRM Failure Audit": {
+      "main": [
+        [
+          {
+            "node": "Respond 502 CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond 502 CRM": {
+      "main": [
+        [
+          {
+            "node": "Fail CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail CRM": {
+      "main": []
     },
     "Build Success Audit": {
       "main": [
